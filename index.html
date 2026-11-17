@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Control de Envíos - Mercado Libre</title>
+  <!-- Librería para leer Excel (.xlsx, .xls, .csv) -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx/dist/xlsx.full.min.js"></script>
+  <!-- Librería para escanear QR y Códigos de Barras -->
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 16px;
+      background-color: #f5f5f5;
+      color: #222;
+    }
+    .card {
+      background: white;
+      padding: 16px;
+      border-radius: 10px;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+      margin-bottom: 16px;
+    }
+    h2, h3 { margin-top: 0; }
+    input[type="file"] { width: 100%; padding: 8px 0; }
+    #reader { width: 100%; border-radius: 8px; overflow: hidden; }
+    .contadores {
+      display: flex;
+      justify-content: space-between;
+      font-weight: bold;
+      margin: 12px 0;
+      padding: 10px;
+      background: #e3f2fd;
+      border-radius: 6px;
+    }
+    button {
+      width: 100%;
+      padding: 14px;
+      font-size: 16px;
+      font-weight: bold;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    #btn-finalizar { background-color: #2e7d32; color: white; }
+    #btn-finalizar:disabled { background-color: #9e9e9e; cursor: not-allowed; }
+    .alerta-ok {
+      background-color: #d4edda;
+      color: #155724;
+      border: 1px solid #c3e6cb;
+      padding: 16px;
+      border-radius: 8px;
+      font-size: 20px;
+      font-weight: bold;
+      text-align: center;
+    }
+    .alerta-error {
+      background-color: #f8d7da;
+      color: #721c24;
+      border: 1px solid #f5c6cb;
+      padding: 14px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+    }
+    ul { padding-left: 20px; margin: 8px 0 0 0; }
+    li { margin-bottom: 6px; }
+    #feedback-escaneo {
+      text-align: center;
+      font-weight: bold;
+      padding: 8px;
+      border-radius: 6px;
+      margin-top: 8px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- PASO 1: CARGAR EXCEL -->
+  <div class="card">
+    <h3>1. Cargar Manifiesto (Excel)</h3>
+    <input type="file" id="input-excel" accept=".xlsx, .xls, .csv" />
+    <small style="color: #666;">Asegúrate de que el Excel tenga una columna llamada <b>ID</b> (o ajusta el nombre en el código).</small>
+  </div>
+
+  <!-- PASO 2: ESCÁNER -->
+  <div class="card" id="seccion-escaner" style="display: none;">
+    <h3>2. Escanear Paquetes</h3>
+    <div id="reader"></div>
+    <div id="feedback-escaneo"></div>
+
+    <div class="contadores">
+      <span>Esperados: <span id="cant-esperados">0</span></span>
+      <span>Escaneados: <span id="cant-escaneados">0</span></span>
+    </div>
+
+    <button id="btn-finalizar" onclick="finalizarControl()">Finalizar Control</button>
+  </div>
+
+  <!-- PASO 3: RESULTADOS -->
+  <div id="resultados"></div>
+
+  <script>
+    // Estructuras en memoria
+    let pedidosEsperados = new Map(); // ID -> Objeto con toda la fila del Excel
+    let codigosEscaneados = new Map(); // ID -> Datos extraídos al escanear (incluye JSON crudo si es extra)
+    let ultimoLeido = "";
+    let html5QrcodeScanner = null;
+
+    // 1. LECTURA DEL ARCHIVO EXCEL
+    document.getElementById('input-excel').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function(event) {
+        const data = new Uint8Array(event.target.result);
+        const workbook = XLSX.read(data, { type: 'array' });
+        const primeraHoja = workbook.SheetNames[0];
+        const filas = XLSX.utils.sheet_to_json(workbook.Sheets[primeraHoja]);
+
+        pedidosEsperados.clear();
+        codigosEscaneados.clear();
+        document.getElementById('resultados').innerHTML = "";
+
+        filas.forEach(fila => {
+          // Busca la columna 'ID', 'id', 'Tracking' o 'Envio' (puedes adaptarlo al nombre exacto de tu Excel)
+          const rawId = fila.ID || fila.id || fila.Tracking || fila.Envio;
+          if (rawId !== undefined && rawId !== null) {
+            const idLimpio = String(rawId).trim();
+            pedidosEsperados.set(idLimpio, fila);
+          }
+        });
+
+        if (pedidosEsperados.size === 0) {
+          alert("No se encontraron registros válidos. Verifica que exista una columna llamada 'ID'.");
+          return;
+        }
+
+        document.getElementById('cant-esperados').innerText = pedidosEsperados.size;
+        document.getElementById('cant-escaneados').innerText = "0";
+        document.getElementById('seccion-escaner').style.display = "block";
+        iniciarCamara();
+      };
+      reader.readAsArrayBuffer(file);
+    });
+
+    // 2. INICIAR ESCÁNER DE CÁMARA
+    function iniciarCamara() {
+      if (html5QrcodeScanner) return; // Ya está iniciado
+      html5QrcodeScanner = new Html5QrcodeScanner("reader", {
+        fps: 15,
+        qrbox: { width: 250, height: 250 }
+      });
+      html5QrcodeScanner.render(alEscanearExito);
+    }
+
+    function alEscanearExito(textoCrudo) {
+      if (textoCrudo === ultimoLeido) return;
+      ultimoLeido = textoCrudo;
+      setTimeout(() => { ultimoLeido = ""; }, 2000); // Permite re-escanear otro paquete tras 2 seg
+
+      let idExtraido = textoCrudo.trim();
+      let infoExtra = { raw: textoCrudo };
+
+      // Si es un QR oficial de Mercado Libre, viene en formato JSON: {"id":"4721...","sender_id":...}
+      try {
+        const jsonML = JSON.parse(textoCrudo);
+        if (jsonML.id) {
+          idExtraido = String(jsonML.id).trim();
+          infoExtra = jsonML;
+        }
+      } catch (err) {
+        // Si no es JSON, es un código de barras tradicional; usamos el texto directo
+      }
+
+      const feedback = document.getElementById('feedback-escaneo');
+      feedback.style.display = "block";
+
+      if (codigosEscaneados.has(idExtraido)) {
+        feedback.style.backgroundColor = "#fff3cd";
+        feedback.style.color = "#856404";
+        feedback.innerText = `⚠️ Ya escaneado: ${idExtraido}`;
+        return;
+      }
+
+      codigosEscaneados.set(idExtraido, infoExtra);
+      document.getElementById('cant-escaneados').innerText = codigosEscaneados.size;
+
+      if (navigator.vibrate) navigator.vibrate(120);
+
+      if (pedidosEsperados.has(idExtraido)) {
+        const datos = pedidosEsperados.get(idExtraido);
+        const detalle = datos.Destinatario || datos.Direccion || "OK en lista";
+        feedback.style.backgroundColor = "#d4edda";
+        feedback.style.color = "#155724";
+        feedback.innerText = `✅ ID: ${idExtraido} (${detalle})`;
+      } else {
+        feedback.style.backgroundColor = "#f8d7da";
+        feedback.style.color = "#721c24";
+        feedback.innerText = `🚨 ENVÍO EXTRA DETECTADO: ${idExtraido}`;
+      }
+    }
+
+    // 3. BOTÓN FINALIZAR Y LÓGICA DE LOS 4 ESCENARIOS
+    function finalizarControl() {
+      const faltantes = [];
+      const extras = [];
+
+      // Buscar FALTANTES (están en el Excel, pero no fueron escaneados)
+      pedidosEsperados.forEach((datosFila, id) => {
+        if (!codigosEscaneados.has(id)) {
+          faltantes.push({ id, datosFila });
+        }
+      });
+
+      // Buscar EXTRAS (fueron escaneados, pero no estaban en el Excel)
+      codigosEscaneados.forEach((infoEscaneo, id) => {
+        if (!pedidosEsperados.has(id)) {
+          extras.push({ id, infoEscaneo });
+        }
+      });
+
+      const contenedorResultados = document.getElementById('resultados');
+      contenedorResultados.innerHTML = "";
+
+      // CASO 1: Todo OK (ni uno más, ni uno menos)
+      if (faltantes.length === 0 && extras.length === 0) {
+        contenedorResultados.innerHTML = `
+          <div class="card">
+            <div class="alerta-ok">Los pedidos</div>
+          </div>
+        `;
+        return;
+      }
+
+      // CASO 2, 3 y 4: Hay extras, faltantes, o ambos
+      let htmlFinal = `<div class="card">`;
+
+      if (extras.length > 0) {
+        htmlFinal += `
+          <div class="alerta-error">
+            <strong>Hay envíos extras en tu lista</strong>
+            <ul>
+              ${extras.map(item => {
+                // Muestra los datos que traía el QR de Mercado Libre si estaban disponibles
+                const detallesQR = item.infoEscaneo.receiver_id 
+                  ? ` | Receptor ID: ${item.infoEscaneo.receiver_id}` 
+                  : '';
+                const cpQR = item.infoEscaneo.zip_code 
+                  ? ` | CP: ${item.infoEscaneo.zip_code}` 
+                  : '';
+                return `<li><b>ID: ${item.id}</b>${cpQR}${detallesQR}</li>`;
+              }).join('')}
+            </ul>
+          </div>
+        `;
+      }
+
+      if (faltantes.length > 0) {
+        htmlFinal += `
+          <div class="alerta-error">
+            <strong>Faltan los siguientes envíos</strong>
+            <ul>
+              ${faltantes.map(item => {
+                // Arma un resumen con las columnas del Excel (ej. Destinatario, Direccion, Barrio)
+                const resumenFila = Object.entries(item.datosFila)
+                  .filter(([clave]) => clave.toLowerCase() !== 'id')
+                  .map(([clave, valor]) => `${clave}: ${valor}`)
+                  .join(' - ');
+                return `<li><b>ID: ${item.id}</b> (${resumenFila || 'Sin detalles adicionales'})</li>`;
+              }).join('')}
+            </ul>
+          </div>
+        `;
+      }
+
+      htmlFinal += `</div>`;
+      contenedorResultados.innerHTML = htmlFinal;
+    }
+  </script>
+</body>
+</html>
