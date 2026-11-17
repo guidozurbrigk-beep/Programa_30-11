@@ -8,38 +8,61 @@ let html5QrcodeScanner = null;
 document.getElementById('input-excel').addEventListener('change', manejarCargaExcel);
 document.getElementById('btn-finalizar').addEventListener('click', finalizarControl);
 
-// 1. Procesar el Excel
+// 1. Procesar el Excel (Versión mejorada)
 function manejarCargaExcel(e) {
   const file = e.target.files[0];
   if (!file) return;
 
   const reader = new FileReader();
   reader.onload = function(event) {
-    const data = new Uint8Array(event.target.result);
-    const workbook = XLSX.read(data, { type: 'array' });
-    const primeraHoja = workbook.SheetNames[0];
-    const filas = XLSX.utils.sheet_to_json(workbook.Sheets[primeraHoja]);
+    try {
+      const data = new Uint8Array(event.target.result);
+      const workbook = XLSX.read(data, { type: 'array' });
+      const primeraHoja = workbook.SheetNames[0];
+      const hoja = workbook.Sheets[primeraHoja];
 
-    pedidosEsperados.clear();
-    codigosEscaneados.clear();
-    document.getElementById('resultados').innerHTML = "";
+      // Leemos como matriz de filas para detectar dónde empiezan los encabezados
+      const matriz = XLSX.utils.sheet_to_json(hoja, { header: 1, defval: "" });
 
-    filas.forEach(fila => {
-      const rawId = fila.ID || fila.id || fila.Tracking || fila.Envio;
-      if (rawId !== undefined && rawId !== null) {
-        pedidosEsperados.set(String(rawId).trim(), fila);
+      // Buscamos la fila que contiene la palabra "id" (sin importar espacios o mayúsculas)
+      let filaEncabezadoIndex = matriz.findIndex(fila =>
+        fila.some(celda => String(celda).trim().toLowerCase() === 'id')
+      );
+
+      if (filaEncabezadoIndex === -1) {
+        alert("No se encontró ninguna columna llamada 'ID' en la primera hoja del Excel.");
+        return;
       }
-    });
 
-    if (pedidosEsperados.size === 0) {
-      alert("No se encontraron registros válidos. Verifica que exista una columna llamada 'ID'.");
-      return;
+      // Convertimos a JSON empezando exactamente desde la fila donde encontró 'ID'
+      const filas = XLSX.utils.sheet_to_json(hoja, { range: filaEncabezadoIndex, defval: "" });
+
+      pedidosEsperados.clear();
+      codigosEscaneados.clear();
+      document.getElementById('resultados').innerHTML = "";
+
+      filas.forEach(fila => {
+        // Buscamos la clave que sea 'id' limpiando espacios y mayúsculas
+        const claveId = Object.keys(fila).find(k => k.trim().toLowerCase() === 'id');
+        if (claveId && fila[claveId] !== "") {
+          const idLimpio = String(fila[claveId]).trim();
+          pedidosEsperados.set(idLimpio, fila);
+        }
+      });
+
+      if (pedidosEsperados.size === 0) {
+        alert("Se encontró la columna 'ID', pero no tiene números de envío debajo.");
+        return;
+      }
+
+      document.getElementById('cant-esperados').innerText = pedidosEsperados.size;
+      document.getElementById('cant-escaneados').innerText = "0";
+      document.getElementById('seccion-escaner').style.display = "block";
+      iniciarCamara();
+
+    } catch (error) {
+      alert("Error al leer el archivo: " + error.message);
     }
-
-    document.getElementById('cant-esperados').innerText = pedidosEsperados.size;
-    document.getElementById('cant-escaneados').innerText = "0";
-    document.getElementById('seccion-escaner').style.display = "block";
-    iniciarCamara();
   };
   reader.readAsArrayBuffer(file);
 }
@@ -93,7 +116,7 @@ function mostrarFeedbackEscaneo(idExtraido, infoExtra) {
 
   if (pedidosEsperados.has(idExtraido)) {
     const datos = pedidosEsperados.get(idExtraido);
-    const detalle = datos.Destinatario || datos.Direccion || "OK en lista";
+    const detalle = datos.Destinatario || datos.Direccion || datos.direccion || "OK en lista";
     feedback.style.backgroundColor = "#d4edda";
     feedback.style.color = "#155724";
     feedback.innerText = `✅ ID: ${idExtraido} (${detalle})`;
@@ -157,7 +180,7 @@ function renderizarResultados(faltantes, extras) {
         <ul>
           ${faltantes.map(item => {
             const resumenFila = Object.entries(item.datosFila)
-              .filter(([clave]) => clave.toLowerCase() !== 'id')
+              .filter(([clave]) => clave.trim().toLowerCase() !== 'id')
               .map(([clave, valor]) => `${clave}: ${valor}`)
               .join(' - ');
             return `<li><b>ID: ${item.id}</b> (${resumenFila || 'Sin detalles adicionales'})</li>`;
